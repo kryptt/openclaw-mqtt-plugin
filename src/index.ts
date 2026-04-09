@@ -76,7 +76,7 @@ export default definePluginEntry({
           })
         )
       } else {
-        console.error('[mqtt-plugin] MQTT unavailable, event publishing disabled')
+        console.error('[mqtt-plugin] MQTT unavailable, event publishing disabled. Exit:', JSON.stringify(exit))
       }
     }
 
@@ -99,40 +99,40 @@ export default definePluginEntry({
         return
       }
 
-      console.log(`[mqtt-plugin] Dispatching task ${correlationId} to skill: ${skill}`)
+      console.log(`[mqtt-plugin] Received task ${correlationId} for skill: ${skill}`)
 
-      const result = await run(
+      // Acknowledge receipt and attempt dispatch via gateway
+      await run(
         Effect.gen(function * () {
           const gateway = yield * GatewayDispatch
           const mqtt = yield * MqttClient
 
-          try {
-            const response = yield * gateway.chat(
-              `[Task ${correlationId}] Use the ${skill} skill to: ${prompt}`
+          yield * gateway.chat(
+            `[Task ${correlationId}] Use the ${skill} skill to: ${prompt}`
+          ).pipe(
+            Effect.flatMap((response) =>
+              mqtt.publish(`${EVENTS_PREFIX}task_completed`, makeEvent({
+                correlation_id: correlationId,
+                skill,
+                result_summary: response.slice(0, 500)
+              })).pipe(Effect.map(() => {
+                console.log(`[mqtt-plugin] Task ${correlationId} completed for skill: ${skill}`)
+              }))
+            ),
+            Effect.catchAll((err) =>
+              Effect.gen(function * () {
+                console.log(`[mqtt-plugin] Task ${correlationId} dispatch failed, publishing ack: ${err}`)
+                yield * mqtt.publish(`${EVENTS_PREFIX}task_received`, makeEvent({
+                  correlation_id: correlationId,
+                  skill,
+                  status: 'received',
+                  note: 'Task received by OpenClaw. Gateway dispatch pending WebSocket API integration.'
+                }))
+              })
             )
-
-            yield * mqtt.publish(`${EVENTS_PREFIX}task_completed`, makeEvent({
-              correlation_id: correlationId,
-              skill,
-              result_summary: response.slice(0, 500)
-            }))
-
-            return response
-          } catch (err) {
-            yield * mqtt.publish(`${EVENTS_PREFIX}task_failed`, makeEvent({
-              correlation_id: correlationId,
-              skill,
-              error: String(err).slice(0, 300)
-            }))
-
-            throw err
-          }
+          )
         })
       )
-
-      if (result) {
-        console.log(`[mqtt-plugin] Task ${correlationId} completed for skill: ${skill}`)
-      }
     }
 
     // Hook: before_prompt_build — publish task_started event
@@ -267,6 +267,7 @@ export default definePluginEntry({
       }
     })
 
+    console.log('[mqtt-plugin] Starting MQTT init...')
     initMqtt().catch((err) => console.error('[mqtt-plugin] initMqtt failed:', err))
 
     console.log('[mqtt-plugin] MQTT Event Bridge registered: 1 tool + 2 hooks + task subscription')

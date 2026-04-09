@@ -19,7 +19,8 @@ export const GatewayDispatchLive = Layer.succeed(GatewayDispatch, {
         const timeout = setTimeout(() => controller.abort(), 120_000)
 
         try {
-          const res = await fetch(`${GATEWAY_URL}/api/chat`, {
+          // Gateway uses WebSocket for chat; REST fallback via control UI API
+          const res = await fetch(`${GATEWAY_URL}/api/chat/send`, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
