@@ -1,0 +1,26 @@
+{
+  "name": "@hr-home/openclaw-mqtt-plugin",
+  "version": "0.1.0",
+  "type": "module",
+  "dependencies": {
+    "effect": "^3.14.0",
+    "mqtt": "^5.10.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.2",
+    "typescript": "^5.7.0",
+    "vitest": "^2.0.5"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "openclaw": {
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.4.5"
+    }
+  }
+}
