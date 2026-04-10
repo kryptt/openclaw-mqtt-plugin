@@ -1,94 +1,109 @@
 import { describe, it, expect } from 'vitest'
-import { EVENTS_PREFIX, TASKS_PREFIX } from '../config.js'
+import { BUS_TOPIC, makeBusMessage, type AgentBusMessage } from '../types.js'
 
-// Test topic construction and payload validation patterns
-// These are extracted helpers that mirror the logic in index.ts
-
-function makeEvent (fields: Record<string, unknown>): Record<string, unknown> {
-  return {
-    correlation_id: fields.correlation_id ?? 'test-uuid',
-    ts: fields.ts ?? '2026-04-09T12:00:00.000Z',
-    ...fields
-  }
-}
-
-function extractSkillFromTopic (topic: string): string {
-  return topic.replace(TASKS_PREFIX, '')
-}
-
-function buildCustomEventTopic (name: string): string {
-  return `${EVENTS_PREFIX}custom/${name}`
-}
-
-describe('MQTT message construction', () => {
-  it('makeEvent includes correlation_id and ts by default', () => {
-    const event = makeEvent({ summary: 'test' })
-    expect(event).toHaveProperty('correlation_id')
-    expect(event).toHaveProperty('ts')
-    expect(event.summary).toBe('test')
+describe('BUS_TOPIC', () => {
+  it('is the single agent bus topic', () => {
+    expect(BUS_TOPIC).toBe('openclaw/agents/bus')
   })
+})
 
-  it('makeEvent allows overriding correlation_id', () => {
-    const event = makeEvent({ correlation_id: 'custom-id', data: {} })
-    expect(event.correlation_id).toBe('custom-id')
-  })
-
-  it('makeEvent preserves all fields', () => {
-    const event = makeEvent({
-      skill: 'cluster-ops',
-      result_summary: 'all pods healthy',
-      duration_ms: 5000
+describe('makeBusMessage', () => {
+  it('creates a task message with required fields', () => {
+    const msg = makeBusMessage('task', 'claude', 'roci', {
+      skill: 'home-auto',
+      prompt: 'turn off lights'
     })
-    expect(event.skill).toBe('cluster-ops')
-    expect(event.result_summary).toBe('all pods healthy')
-    expect(event.duration_ms).toBe(5000)
+    expect(msg.type).toBe('task')
+    expect(msg.from).toBe('claude')
+    expect(msg.to).toBe('roci')
+    expect(msg.skill).toBe('home-auto')
+    expect(msg.prompt).toBe('turn off lights')
+    expect(msg.id).toMatch(/^[0-9a-f-]{36}$/)
+    expect(msg.ts).toBeTruthy()
+  })
+
+  it('creates a chat message', () => {
+    const msg = makeBusMessage('message', 'roci', 'claude', {
+      body: 'Hello from Roci'
+    })
+    expect(msg.type).toBe('message')
+    expect(msg.body).toBe('Hello from Roci')
+  })
+
+  it('creates a presence message', () => {
+    const msg = makeBusMessage('presence', 'roci', '*', {
+      user: 'rodolfo',
+      channel: 'telegram'
+    })
+    expect(msg.type).toBe('presence')
+    expect(msg.user).toBe('rodolfo')
+    expect(msg.channel).toBe('telegram')
+    expect(msg.to).toBe('*')
+  })
+
+  it('creates an event message', () => {
+    const msg = makeBusMessage('event', 'roci', '*', {
+      status: 'completed',
+      summary: 'Task done'
+    })
+    expect(msg.type).toBe('event')
+    expect(msg.status).toBe('completed')
+    expect(msg.summary).toBe('Task done')
+  })
+
+  it('event message with data payload', () => {
+    const msg = makeBusMessage('event', 'roci', 'claude', {
+      status: 'error',
+      summary: 'Failed',
+      data: { code: 500, detail: 'timeout' }
+    })
+    expect(msg.data).toEqual({ code: 500, detail: 'timeout' })
   })
 })
 
-describe('topic parsing', () => {
-  it('extracts skill name from task topic', () => {
-    expect(extractSkillFromTopic('openclaw/tasks/cluster-ops')).toBe('cluster-ops')
-    expect(extractSkillFromTopic('openclaw/tasks/home-auto')).toBe('home-auto')
-    expect(extractSkillFromTopic('openclaw/tasks/knowledge-curator')).toBe('knowledge-curator')
+describe('discriminated union', () => {
+  it('narrows task by type field', () => {
+    const msg: AgentBusMessage = makeBusMessage('task', 'a', 'b', {
+      skill: 'x',
+      prompt: 'y'
+    })
+    if (msg.type === 'task') {
+      expect(msg.skill).toBe('x')
+      expect(msg.prompt).toBe('y')
+    }
   })
 
-  it('handles nested task topics', () => {
-    expect(extractSkillFromTopic('openclaw/tasks/custom/sub')).toBe('custom/sub')
-  })
-})
-
-describe('custom event topic construction', () => {
-  it('builds correct topic path', () => {
-    expect(buildCustomEventTopic('sensor_anomaly')).toBe('openclaw/events/custom/sensor_anomaly')
-    expect(buildCustomEventTopic('alert')).toBe('openclaw/events/custom/alert')
-  })
-})
-
-describe('topic prefixes', () => {
-  it('events prefix ends with /', () => {
-    expect(EVENTS_PREFIX).toBe('openclaw/events/')
+  it('narrows message by type field', () => {
+    const msg: AgentBusMessage = makeBusMessage('message', 'a', 'b', { body: 'hi' })
+    if (msg.type === 'message') {
+      expect(msg.body).toBe('hi')
+    }
   })
 
-  it('tasks prefix ends with /', () => {
-    expect(TASKS_PREFIX).toBe('openclaw/tasks/')
+  it('narrows presence by type field', () => {
+    const msg: AgentBusMessage = makeBusMessage('presence', 'a', '*', { user: 'u', channel: 'c' })
+    if (msg.type === 'presence') {
+      expect(msg.user).toBe('u')
+      expect(msg.channel).toBe('c')
+    }
+  })
+
+  it('narrows event by type field', () => {
+    const msg: AgentBusMessage = makeBusMessage('event', 'a', '*', { status: 'completed', summary: 's' })
+    if (msg.type === 'event') {
+      expect(msg.status).toBe('completed')
+    }
   })
 })
 
 describe('payload serialization', () => {
-  it('makeEvent produces valid JSON-serializable output', () => {
-    const event = makeEvent({
-      skill: 'cluster-ops',
-      data: { pods: [{ name: 'test', status: 'Running' }] }
+  it('produces valid JSON', () => {
+    const msg = makeBusMessage('message', 'claude', 'roci', {
+      body: 'test with "quotes" and\nnewlines'
     })
-    const json = JSON.stringify(event)
+    const json = JSON.stringify(msg)
     const parsed = JSON.parse(json)
-    expect(parsed.skill).toBe('cluster-ops')
-    expect(parsed.data.pods).toHaveLength(1)
-  })
-
-  it('handles empty data gracefully', () => {
-    const event = makeEvent({})
-    expect(event).toHaveProperty('correlation_id')
-    expect(event).toHaveProperty('ts')
+    expect(parsed.type).toBe('message')
+    expect(parsed.body).toContain('quotes')
   })
 })

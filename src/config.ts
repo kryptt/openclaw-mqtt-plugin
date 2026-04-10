@@ -7,5 +7,4 @@ export const MQTT_RECONNECT_MS = 5000
 export const GATEWAY_URL = process.env.OPENCLAW_GATEWAY_URL ?? 'http://localhost:18789'
 export const GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN ?? ''
 
-export const EVENTS_PREFIX = 'openclaw/events/'
-export const TASKS_PREFIX = 'openclaw/tasks/'
+export const AGENT_NAME = process.env.AGENT_NAME ?? 'roci'

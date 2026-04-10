@@ -2,7 +2,8 @@ import { Effect, Layer } from 'effect'
 import { definePluginEntry } from 'openclaw/plugin-sdk/plugin-entry'
 import { MqttClient, MqttClientLive } from './services/MqttClient.js'
 import { GatewayDispatch, GatewayDispatchLive } from './services/GatewayDispatch.js'
-import { EVENTS_PREFIX, TASKS_PREFIX } from './config.js'
+import { AGENT_NAME } from './config.js'
+import { BUS_TOPIC, makeBusMessage, type AgentBusMessage } from './types.js'
 
 type AppServices = MqttClient | GatewayDispatch
 
@@ -27,22 +28,23 @@ const run = <A>(
       })
     ))
 
-// Track correlation IDs for task_started → agent_end pairing
-let currentCorrelationId: string | null = null
+// Track correlation IDs for before_prompt_build → agent_end pairing
+let currentMessageId: string | null = null
 let taskStartedAt: number | null = null
 
-function makeEvent (fields: Record<string, unknown>): Record<string, unknown> {
-  return {
-    correlation_id: fields.correlation_id ?? crypto.randomUUID(),
-    ts: new Date().toISOString(),
-    ...fields
-  }
+function publishToBus (msg: AgentBusMessage): Promise<void | undefined> {
+  return run(
+    Effect.gen(function * () {
+      const mqtt = yield * MqttClient
+      yield * mqtt.publish(BUS_TOPIC, msg as unknown as Record<string, unknown>)
+    })
+  )
 }
 
 export default definePluginEntry({
   id: 'openclaw-mqtt-plugin',
-  name: 'MQTT Event Bridge',
-  description: 'Publishes agent events to MQTT and subscribes to task requests for Claude Code peer bridge',
+  name: 'Agent Bus Bridge',
+  description: 'Bridges OpenClaw agent to the shared agent bus (openclaw/agents/bus) for inter-agent communication',
   kind: 'integration',
 
   register (api) {
@@ -51,7 +53,6 @@ export default definePluginEntry({
       const exit = await Effect.runPromiseExit(
         Effect.gen(function * () {
           const mqtt = yield * MqttClient
-          // Verify connection works
           if (!mqtt.isConnected()) {
             throw new Error('Not connected after init')
           }
@@ -62,72 +63,79 @@ export default definePluginEntry({
         const safeMqttLayer = Layer.catchAll(MqttClientLive, () => noopMqttLayer)
         appLayer = Layer.mergeAll(safeMqttLayer, GatewayDispatchLive)
         mqttReady = true
-        console.log('[mqtt-plugin] MQTT connected, setting up task subscription')
+        console.log('[mqtt-plugin] MQTT connected, subscribing to agent bus')
 
-        // Subscribe to incoming task requests
+        // Subscribe to the single agent bus topic
         await run(
           Effect.gen(function * () {
             const mqtt = yield * MqttClient
-            yield * mqtt.subscribe(`${TASKS_PREFIX}#`, (topic, payload) => {
-              handleIncomingTask(topic, payload).catch((err) =>
-                console.error('[mqtt-plugin] Task dispatch error:', err)
+            yield * mqtt.subscribe(BUS_TOPIC, (topic, payload) => {
+              handleBusMessage(payload).catch((err) =>
+                console.error('[mqtt-plugin] Bus message error:', err)
               )
             })
           })
         )
       } else {
-        console.error('[mqtt-plugin] MQTT unavailable, event publishing disabled. Exit:', JSON.stringify(exit))
+        console.error('[mqtt-plugin] MQTT unavailable, agent bus disabled. Exit:', JSON.stringify(exit))
       }
     }
 
-    // Handle incoming task requests from Claude Code (via openclaw-bridge)
-    async function handleIncomingTask (topic: string, payload: Buffer): Promise<void> {
-      let parsed: { correlation_id?: string, prompt?: string }
+    // Handle incoming messages from the agent bus
+    async function handleBusMessage (payload: Buffer): Promise<void> {
+      let msg: AgentBusMessage
       try {
-        parsed = JSON.parse(payload.toString())
+        msg = JSON.parse(payload.toString())
       } catch {
-        console.error('[mqtt-plugin] Invalid task payload on', topic)
+        console.error('[mqtt-plugin] Invalid bus message payload')
         return
       }
 
-      const skill = topic.replace(TASKS_PREFIX, '')
-      const correlationId = parsed.correlation_id ?? crypto.randomUUID()
-      const prompt = parsed.prompt ?? ''
+      // Only process messages addressed to this agent
+      if (msg.to !== AGENT_NAME && msg.to !== '*') return
+      // Ignore our own messages
+      if (msg.from === AGENT_NAME) return
 
-      if (!prompt) {
-        console.error('[mqtt-plugin] Empty prompt in task for skill:', skill)
-        return
+      switch (msg.type) {
+        case 'task':
+          await handleTask(msg)
+          break
+        case 'message':
+          await handleIncomingMessage(msg)
+          break
+        // presence and event from other agents — ignore for now
       }
+    }
 
-      console.log(`[mqtt-plugin] Received task ${correlationId} for skill: ${skill}`)
+    // Dispatch a task to the OpenClaw agent via gateway
+    async function handleTask (msg: AgentBusMessage & { type: 'task' }): Promise<void> {
+      console.log(`[mqtt-plugin] Task ${msg.id} from ${msg.from}: skill=${msg.skill}`)
 
-      // Acknowledge receipt and attempt dispatch via gateway
       await run(
         Effect.gen(function * () {
           const gateway = yield * GatewayDispatch
           const mqtt = yield * MqttClient
 
           yield * gateway.chat(
-            `[Task ${correlationId}] Use the ${skill} skill to: ${prompt}`
+            `[Task ${msg.id}] Use the ${msg.skill} skill to: ${msg.prompt}`
           ).pipe(
             Effect.flatMap((response) =>
-              mqtt.publish(`${EVENTS_PREFIX}task_completed`, makeEvent({
-                correlation_id: correlationId,
-                skill,
-                result_summary: response.slice(0, 500)
-              })).pipe(Effect.map(() => {
-                console.log(`[mqtt-plugin] Task ${correlationId} completed for skill: ${skill}`)
+              mqtt.publish(BUS_TOPIC, makeBusMessage('event', AGENT_NAME, msg.from, {
+                status: 'completed',
+                summary: response.slice(0, 500),
+                data: { taskId: msg.id, skill: msg.skill }
+              }) as unknown as Record<string, unknown>).pipe(Effect.map(() => {
+                console.log(`[mqtt-plugin] Task ${msg.id} completed`)
               }))
             ),
             Effect.catchAll((err) =>
               Effect.gen(function * () {
-                console.log(`[mqtt-plugin] Task ${correlationId} dispatch failed, publishing ack: ${err}`)
-                yield * mqtt.publish(`${EVENTS_PREFIX}task_received`, makeEvent({
-                  correlation_id: correlationId,
-                  skill,
-                  status: 'received',
-                  note: 'Task received by OpenClaw. Gateway dispatch pending WebSocket API integration.'
-                }))
+                console.error(`[mqtt-plugin] Task ${msg.id} failed: ${err}`)
+                yield * mqtt.publish(BUS_TOPIC, makeBusMessage('event', AGENT_NAME, msg.from, {
+                  status: 'error',
+                  summary: `Task failed: ${err}`,
+                  data: { taskId: msg.id, skill: msg.skill }
+                }) as unknown as Record<string, unknown>)
               })
             )
           )
@@ -135,40 +143,50 @@ export default definePluginEntry({
       )
     }
 
-    // Hook: before_prompt_build — publish task_started event
+    // Handle a direct message from another agent
+    async function handleIncomingMessage (msg: AgentBusMessage & { type: 'message' }): Promise<void> {
+      console.log(`[mqtt-plugin] Message from ${msg.from}: ${msg.body.slice(0, 100)}`)
+      // Forward to the agent as a chat prompt so it can respond
+      await run(
+        Effect.gen(function * () {
+          const gateway = yield * GatewayDispatch
+          yield * gateway.chat(
+            `[Message from ${msg.from}] ${msg.body}`
+          )
+        })
+      )
+    }
+
+    // Hook: before_prompt_build — publish event:started
     api.on('before_prompt_build', async (event: any) => {
       if (!mqttReady) return {}
 
       try {
-        let msg = ''
+        let prompt = ''
         const msgs: any[] = event?.messages ?? []
         const userMsgs = msgs.filter((m: any) => m.role === 'user')
         if (userMsgs.length) {
           const last = userMsgs[userMsgs.length - 1]
           const content = last.content
           if (typeof content === 'string') {
-            msg = content
+            prompt = content
           } else if (Array.isArray(content)) {
-            msg = content
+            prompt = content
               .filter((b: any) => b.type === 'text')
               .map((b: any) => b.text)
               .join(' ')
           }
         }
-        if (!msg || msg.length < 5) return {}
+        if (!prompt || prompt.length < 5) return {}
 
-        currentCorrelationId = crypto.randomUUID()
+        const msg = makeBusMessage('event', AGENT_NAME, '*', {
+          status: 'started',
+          summary: prompt.slice(0, 200)
+        })
+        currentMessageId = msg.id
         taskStartedAt = Date.now()
 
-        await run(
-          Effect.gen(function * () {
-            const mqtt = yield * MqttClient
-            yield * mqtt.publish(`${EVENTS_PREFIX}task_started`, makeEvent({
-              correlation_id: currentCorrelationId,
-              prompt_preview: msg.slice(0, 200)
-            }))
-          })
-        )
+        await publishToBus(msg)
       } catch {
         // Event publishing is best-effort
       }
@@ -176,7 +194,7 @@ export default definePluginEntry({
       return {}
     })
 
-    // Hook: agent_end — publish agent_end event with summary
+    // Hook: agent_end — publish event:completed
     api.on('agent_end', async (event: any) => {
       if (!mqttReady) return {}
 
@@ -200,19 +218,16 @@ export default definePluginEntry({
 
         const durationMs = taskStartedAt ? Date.now() - taskStartedAt : 0
 
-        await run(
-          Effect.gen(function * () {
-            const mqtt = yield * MqttClient
-            yield * mqtt.publish(`${EVENTS_PREFIX}agent_end`, makeEvent({
-              correlation_id: currentCorrelationId ?? crypto.randomUUID(),
-              summary: summary || 'No summary available',
-              status: 'completed',
-              duration_ms: durationMs
-            }))
-          })
-        )
+        await publishToBus(makeBusMessage('event', AGENT_NAME, '*', {
+          status: 'completed',
+          summary: summary || 'No summary available',
+          data: {
+            replyTo: currentMessageId,
+            duration_ms: durationMs
+          }
+        }))
 
-        currentCorrelationId = null
+        currentMessageId = null
         taskStartedAt = null
       } catch {
         // Event publishing is best-effort
@@ -221,48 +236,84 @@ export default definePluginEntry({
       return {}
     })
 
-    // Tool: mqtt_publish — let the agent publish custom events
+    // Tool: agent_comms — send messages to the agent bus
     api.registerTool({
-      name: 'mqtt_publish',
-      label: 'Publish MQTT Event',
-      description: 'Publish a custom event to the MQTT event bus at openclaw/events/custom/{topic}. ' +
-        'Use this to share observations, alerts, or status updates that Claude Code or other agents can read.',
+      name: 'agent_comms',
+      label: 'Agent Communications',
+      description: 'Send a message on the shared agent bus (openclaw/agents/bus).\n\n' +
+        'Message types:\n' +
+        '  message — send text to another agent or user\n' +
+        '  task    — request another agent to execute a skill\n' +
+        '  presence — announce interaction with a human user\n\n' +
+        'Addressing:\n' +
+        '  to: "claude"        — direct to Claude Code agent\n' +
+        '  to: "roci"          — direct to this agent (self)\n' +
+        '  to: "user:rodolfo"  — route to human via most-recent agent\n' +
+        '  to: "*"             — broadcast to all agents\n\n' +
+        'Fields by type:\n' +
+        '  message: { body: string }\n' +
+        '  task:    { skill: string, prompt: string }\n' +
+        '  presence: { user: string, channel: string }',
       parameters: {
         type: 'object',
         properties: {
-          topic: {
+          type: {
             type: 'string',
-            description: 'Event topic name (appended to openclaw/events/custom/)'
+            enum: ['message', 'task', 'presence'],
+            description: 'Message type'
           },
-          data: {
-            type: 'object',
-            description: 'Event data payload (arbitrary JSON)'
-          }
+          to: {
+            type: 'string',
+            description: 'Recipient: agent name, "user:canonical-id", or "*" for broadcast'
+          },
+          body: { type: 'string', description: 'Text content (type: message)' },
+          skill: { type: 'string', description: 'Skill to invoke (type: task)' },
+          prompt: { type: 'string', description: 'Task prompt (type: task)' },
+          user: { type: 'string', description: 'Human canonical id (type: presence)' },
+          channel: { type: 'string', description: 'Communication channel (type: presence)' },
+          replyTo: { type: 'string', description: 'Message id being replied to (optional)' }
         },
-        required: ['topic', 'data']
+        required: ['type', 'to']
       },
       async execute (...rawArgs: any[]) {
         const args = (typeof rawArgs[0] === 'object' && rawArgs[0] !== null
           ? rawArgs[0]
-          : rawArgs[1] ?? {}) as { topic: string, data: Record<string, unknown> }
+          : rawArgs[1] ?? {}) as Record<string, string>
 
         if (!mqttReady) {
-          return { content: [{ type: 'text', text: 'MQTT not connected, event not published.' }] }
+          return { content: [{ type: 'text', text: 'MQTT not connected.' }] }
         }
 
         try {
-          await run(
-            Effect.gen(function * () {
-              const mqtt = yield * MqttClient
-              yield * mqtt.publish(
-                `${EVENTS_PREFIX}custom/${args.topic}`,
-                makeEvent({ data: args.data })
-              )
-            })
-          )
-          return { content: [{ type: 'text', text: `Published to ${EVENTS_PREFIX}custom/${args.topic}` }] }
+          let msg: AgentBusMessage
+          switch (args.type) {
+            case 'message':
+              msg = makeBusMessage('message', AGENT_NAME, args.to, {
+                body: args.body ?? '',
+                ...(args.replyTo ? { replyTo: args.replyTo } : {})
+              })
+              break
+            case 'task':
+              msg = makeBusMessage('task', AGENT_NAME, args.to, {
+                skill: args.skill ?? 'general',
+                prompt: args.prompt ?? '',
+                ...(args.replyTo ? { replyTo: args.replyTo } : {})
+              })
+              break
+            case 'presence':
+              msg = makeBusMessage('presence', AGENT_NAME, '*', {
+                user: args.user ?? '',
+                channel: args.channel ?? ''
+              })
+              break
+            default:
+              return { content: [{ type: 'text', text: `Unknown type: ${args.type}` }] }
+          }
+
+          await publishToBus(msg)
+          return { content: [{ type: 'text', text: `Sent ${msg.type} to ${msg.to} (id: ${msg.id})` }] }
         } catch (err) {
-          return { content: [{ type: 'text', text: `Publish failed: ${err}` }] }
+          return { content: [{ type: 'text', text: `Send failed: ${err}` }] }
         }
       }
     })
@@ -270,6 +321,6 @@ export default definePluginEntry({
     console.log('[mqtt-plugin] Starting MQTT init...')
     initMqtt().catch((err) => console.error('[mqtt-plugin] initMqtt failed:', err))
 
-    console.log('[mqtt-plugin] MQTT Event Bridge registered: 1 tool + 2 hooks + task subscription')
+    console.log('[mqtt-plugin] Agent Bus Bridge registered: 1 tool (agent_comms) + 2 hooks')
   }
 })
