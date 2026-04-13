@@ -1,6 +1,6 @@
 {
   "name": "@kryptt/openclaw-mqtt-plugin",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "OpenClaw plugin: bridge agent bus messages to/from MQTT for cross-agent coordination",
   "type": "module",
   "license": "MIT",
