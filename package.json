@@ -1,7 +1,13 @@
 {
-  "name": "@hr-home/openclaw-mqtt-plugin",
+  "name": "@kryptt/openclaw-mqtt-plugin",
   "version": "0.1.0",
+  "description": "OpenClaw plugin: bridge agent bus messages to/from MQTT for cross-agent coordination",
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kryptt/openclaw-mqtt-plugin.git"
+  },
   "dependencies": {
     "effect": "^3.14.0",
     "mqtt": "^5.10.0"
@@ -21,6 +27,9 @@
     ],
     "compat": {
       "pluginApi": ">=2026.4.5"
+    },
+    "release": {
+      "publishToClawHub": true
     }
   }
 }
