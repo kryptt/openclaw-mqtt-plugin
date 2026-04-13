@@ -97,17 +97,6 @@ jobs:
             exit 1
           fi
 
-      - name: Diagnostic — OIDC env + manual token fetch
-        run: |
-          set +e
-          echo "ACTIONS_ID_TOKEN_REQUEST_URL is ${ACTIONS_ID_TOKEN_REQUEST_URL:+SET}${ACTIONS_ID_TOKEN_REQUEST_URL:-UNSET}"
-          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN is ${ACTIONS_ID_TOKEN_REQUEST_TOKEN:+SET}${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-UNSET}"
-          if [[ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]]; then
-            url="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=clawhub"
-            echo "Attempting OIDC token fetch (first 80 chars of JWT):"
-            curl -sSf -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" -H "Accept: application/json" "${url}" | python3 -c 'import sys,json; t=json.load(sys.stdin).get("value",""); print(t[:80] + ("..." if len(t)>80 else "") if t else "<empty>")'
-          fi
-
       - name: Publish to ClawHub
         env:
           CLAWHUB_REGISTRY: ${{ env.CLAWHUB_REGISTRY }}
