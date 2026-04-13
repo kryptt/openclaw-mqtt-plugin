@@ -112,12 +112,12 @@ jobs:
           # 2. Decode claims (middle segment)
           echo "$jwt" | cut -d. -f2 | python3 -c 'import sys,base64,json; s=sys.stdin.read().strip(); s+="="*(4-len(s)%4); c=json.loads(base64.urlsafe_b64decode(s)); [print(f"  {k}: {c.get(k)}") for k in ["sub","aud","iss","repository","repository_owner","job_workflow_ref","environment"]]'
 
-          # 3. Try mint token
-          echo "Minting publish token from ${CLAWHUB_REGISTRY}..."
+          # 3. Try mint token (correct route: /api/v1/publish/token/mint)
+          echo "Minting publish token from ${CLAWHUB_REGISTRY}/api/v1/publish/token/mint ..."
           resp=$(curl -sS -w "\nHTTP_CODE:%{http_code}" -X POST \
             -H "Content-Type: application/json" \
             -d "{\"packageName\":\"${PKG_NAME}\",\"version\":\"${PKG_VERSION}\",\"githubOidcToken\":\"${jwt}\"}" \
-            "${CLAWHUB_REGISTRY}/api/v1/packages/publish-token/mint")
+            "${CLAWHUB_REGISTRY}/api/v1/publish/token/mint")
           echo "$resp" | head -5
 
       - name: Publish to ClawHub
