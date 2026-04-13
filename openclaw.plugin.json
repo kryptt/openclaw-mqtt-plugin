@@ -1,0 +1,35 @@
+{
+  "id": "openclaw-mqtt-plugin",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "mqttUrl": { "type": "string" },
+      "mqttUser": { "type": "string" },
+      "mqttPass": { "type": "string" },
+      "agentName": { "type": "string" },
+      "busTopic": { "type": "string" }
+    }
+  },
+  "uiHints": {
+    "mqttUrl": {
+      "label": "MQTT broker URL",
+      "placeholder": "mqtt://mosquitto.home:1883"
+    },
+    "mqttUser": {
+      "label": "MQTT username"
+    },
+    "mqttPass": {
+      "label": "MQTT password",
+      "secret": true
+    },
+    "agentName": {
+      "label": "Agent name used on the bus",
+      "placeholder": "roci"
+    },
+    "busTopic": {
+      "label": "Bus topic prefix",
+      "placeholder": "openclaw/agents/bus"
+    }
+  }
+}
