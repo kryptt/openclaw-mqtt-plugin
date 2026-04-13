@@ -110,13 +110,7 @@ jobs:
           echo "Got OIDC JWT (${#jwt} chars)"
 
           # 2. Decode claims (middle segment)
-          echo "$jwt" | cut -d. -f2 | python3 -c '
-          import sys,base64,json
-          segment = sys.stdin.read().strip()
-          segment += "=" * (4 - len(segment) % 4)
-          claims = json.loads(base64.urlsafe_b64decode(segment))
-          for k in ("sub","aud","iss","repository","repository_owner","job_workflow_ref","environment"):
-            print(f"  {k}: {claims.get(k, \"<missing>\")}") '
+          echo "$jwt" | cut -d. -f2 | python3 -c 'import sys,base64,json; s=sys.stdin.read().strip(); s+="="*(4-len(s)%4); c=json.loads(base64.urlsafe_b64decode(s)); [print(f"  {k}: {c.get(k)}") for k in ["sub","aud","iss","repository","repository_owner","job_workflow_ref","environment"]]'
 
           # 3. Try mint token
           echo "Minting publish token from ${CLAWHUB_REGISTRY}..."
