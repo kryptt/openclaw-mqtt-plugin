@@ -97,6 +97,35 @@ jobs:
             exit 1
           fi
 
+      - name: Debug — manual OIDC exchange with ClawHub
+        env:
+          CLAWHUB_REGISTRY: ${{ env.CLAWHUB_REGISTRY }}
+          PKG_NAME: ${{ steps.meta.outputs.name }}
+          PKG_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          # 1. Fetch OIDC JWT
+          url="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=clawhub"
+          jwt=$(curl -sSf -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" -H "Accept: application/json" "${url}" | python3 -c 'import sys,json; print(json.load(sys.stdin)["value"])')
+          echo "Got OIDC JWT (${#jwt} chars)"
+
+          # 2. Decode claims (middle segment)
+          echo "$jwt" | cut -d. -f2 | python3 -c '
+          import sys,base64,json
+          segment = sys.stdin.read().strip()
+          segment += "=" * (4 - len(segment) % 4)
+          claims = json.loads(base64.urlsafe_b64decode(segment))
+          for k in ("sub","aud","iss","repository","repository_owner","job_workflow_ref","environment"):
+            print(f"  {k}: {claims.get(k, \"<missing>\")}") '
+
+          # 3. Try mint token
+          echo "Minting publish token from ${CLAWHUB_REGISTRY}..."
+          resp=$(curl -sS -w "\nHTTP_CODE:%{http_code}" -X POST \
+            -H "Content-Type: application/json" \
+            -d "{\"packageName\":\"${PKG_NAME}\",\"version\":\"${PKG_VERSION}\",\"githubOidcToken\":\"${jwt}\"}" \
+            "${CLAWHUB_REGISTRY}/api/v1/packages/publish-token/mint")
+          echo "$resp" | head -5
+
       - name: Publish to ClawHub
         env:
           CLAWHUB_REGISTRY: ${{ env.CLAWHUB_REGISTRY }}
