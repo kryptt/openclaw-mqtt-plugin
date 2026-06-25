@@ -14,7 +14,7 @@
   "uiHints": {
     "mqttUrl": {
       "label": "MQTT broker URL",
-      "placeholder": "mqtt://mosquitto.home:1883"
+      "placeholder": "mqtt://localhost:1883"
     },
     "mqttUser": {
       "label": "MQTT username"
